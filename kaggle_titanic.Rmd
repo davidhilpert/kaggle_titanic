@@ -1,0 +1,302 @@
+---
+title: "kaggle_titanic"
+output: html_document
+date: "2024-10-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. 
+
+```{r reset and load packages}
+rm(list = ls())
+
+library(randomForest)
+library(xgboost)
+library(neuralnet)
+library(keras)
+library(tensorflow)
+library(corrplot)
+library("GGally")
+```
+
+
+```{r load data}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+df_train <- read.csv("train.csv")
+df_test <- read.csv("test.csv")
+df_gs <- read.csv("gender_submission.csv")
+
+all(names(df_test) %in% names(df_train) )
+
+# add labels to test set
+df_test <- merge(df_test, df_gs, all.x = T, by = "PassengerId")
+rm(df_gs)
+
+summary(df_train)
+apply(is.na(df_train), 2,sum)
+```
+
+
+```{r prepare data}
+# join train and test set such that data needs to be prepared only once 
+df_train$train_test_split <- "train"
+df_test$train_test_split <- "test"
+df <- rbind(df_train, df_test)
+rm(df_train, df_test)
+
+df$female <- 0
+df$female[df$Sex == 'female'] <- 1
+
+df$class2_dummy <- df$class3_dummy <- 0 # reference class 1
+df$class2_dummy[df$Pclass == 2] <- 1
+df$class3_dummy[df$Pclass == 3] <- 1
+
+df$Embarked[df$Embarked == ""] <- median(df$Embarked) # impute ####
+df$embarkedQ_dummy <- df$embarkedS_dummy <- 0 # reference cat C
+df$embarkedQ_dummy[df$Embarked == "Q"] <- 1
+df$embarkedS_dummy[df$Embarked == "S"] <- 1
+
+# strsplit(df_train$Cabin, "[A-Z]")
+
+df$cabin_info <- I(df$Cabin != "") * 1
+df$cabin_letter <- substr(df$Cabin,1,1)
+df$cabin_A_dummy <- df$cabin_B_dummy <- df$cabin_C_dummy <- df$cabin_D_dummy <- df$cabin_E_dummy <- df$cabin_F_dummy <- df$cabin_G_dummy <- df$cabin_T_dummy <- 0 # reference cat ""
+df$cabin_A_dummy[df$cabin_letter == 'A'] <- 1
+df$cabin_B_dummy[df$cabin_letter == 'B'] <- 1
+df$cabin_C_dummy[df$cabin_letter == 'C'] <- 1
+df$cabin_D_dummy[df$cabin_letter == 'D'] <- 1
+df$cabin_E_dummy[df$cabin_letter == 'E'] <- 1
+df$cabin_F_dummy[df$cabin_letter == 'F'] <- 1
+df$cabin_G_dummy[df$cabin_letter == 'G'] <- 1
+df$cabin_T_dummy[df$cabin_letter == 'T'] <- 1
+
+# shared cabin 
+
+
+# impute
+plot(df$Age, df$Survived, pch = 16, col = rgb(0, 0, 0, 0.05))
+with(df[!is.na(df$Age),], table(Survived))
+df$Age[is.na(df$Age)] <- mean(df$Age, na.rm = T)
+df$minor <- 0
+df$minor[df$Age < 18] <- 1
+
+
+# adult travelling with minor 
+
+
+
+# travel alone 
+df$travel_alone <- 0
+tmp <- data.frame(table(df$Ticket))
+names(tmp) <- c("Ticket", "travelers with ticket")
+df <- merge(df, tmp, all.x = T, by = "Ticket")
+rm(tmp)
+df$travel_alone[df$`travelers with ticket` == 1] <- 1
+```
+
+```{r descriptives, echo=FALSE}
+dff <- subset(df, select = c(Survived
+                    ,Age
+                      ,minor
+                      ,class2_dummy
+                      ,class3_dummy
+                      ,female
+                      ,Fare
+                      ,SibSp
+                      ,Parch
+                      ,embarkedQ_dummy
+                      ,embarkedS_dummy
+                      ,cabin_A_dummy
+                      ,cabin_B_dummy
+                      ,cabin_C_dummy
+                      ,cabin_D_dummy
+                      ,cabin_E_dummy
+                      ,cabin_F_dummy
+                      ,cabin_G_dummy
+                      ,cabin_T_dummy
+                      ,travel_alone
+                    , train_test_split))
+
+tmp <- cor(dff[,names(dff) != "train_test_split"], use = "pairwise.complete.obs")
+corrplot(tmp, method = 'color', order = 'alphabet', tl.col = "black")
+```
+```{r ggpair, echo=F}
+ggpairs(dff, columns = 1:6)
+
+```
+
+```{r train test split}
+df_train <- dff[dff$train_test_split == 'train',]
+set.seed(123)
+random_sample <- sample(1:nrow(df_train), round(.8*nrow(df_train)), replace = F)
+df_val <- df_train[-random_sample,]
+df_train <- df_train[random_sample,]
+df_test <- dff[dff$train_test_split == 'test',]
+
+df_train$train_test_split <- df_val$train_test_split <- df_test$train_test_split <- NULL
+rm(df, dff)
+```
+
+
+
+
+```{r modelling}
+# model ####
+m1 <- glm(Survived ~ 
+          .
+          , data = df_train
+          , family = "binomial")
+
+pred_probs <- predict(m1, newdata = df_train, type = "response")
+
+m2_rf <- randomForest(as.factor(Survived) ~ 
+                     .
+                   , data = df_train
+                   , proximity=T
+                   , ntree = 10000
+                   , nodesize = 10
+                   , corr.bias = T) 
+
+var_order <- c(
+   'Age'
+  ,'minor'
+  ,'class2_dummy'
+  ,'class3_dummy'
+  ,'female'
+  ,'Fare'
+  ,'SibSp'
+  ,'Parch'
+  ,'embarkedQ_dummy'
+  ,'embarkedS_dummy'
+  ,'cabin_A_dummy'
+  ,'cabin_B_dummy'
+  ,'cabin_C_dummy'
+  ,'cabin_D_dummy'
+  ,'cabin_E_dummy'
+  ,'cabin_F_dummy'
+  ,'cabin_G_dummy'
+  ,'cabin_T_dummy'
+  ,'travel_alone'  
+  ,'Survived'
+)
+
+df_train_mat <- subset(df_train, select = var_order)
+df_val_mat <- subset(df_val, select = var_order)
+df_test_mat <- subset(df_test, select = var_order)
+
+df_train_mat <- as.matrix(df_train_mat)
+df_val_mat <- as.matrix(df_val_mat)
+df_test_mat <- as.matrix(df_test_mat)
+
+params <- list(
+  objective = "binary:logistic"  # Objective function here
+  ,eval_metric = "auc"           # Evaluation metric
+  ,max_depth = 5                 # default 6
+  #,subsample = .5                # default 1
+  ,gamma = 6                     # minimum loss reduction required to make a further partition on leaf node
+)
+
+# Prepare data using xgb.DMatrix
+dtrain <- xgb.DMatrix(data = df_train_mat[, 1:(ncol(df_train_mat)-1)], label = df_train_mat[, ncol(df_train_mat)])
+dval <- xgb.DMatrix(data = df_val_mat[, 1:(ncol(df_val_mat)-1)], label = df_val_mat[, ncol(df_val_mat)])
+
+# Construct the watchlist
+watchlist <- list(train = dtrain, val = dval)
+
+# Train the model using xgb.train
+m3_xgb <- xgb.train(params = params,                         # Model parameters
+          data = dtrain,                                     # Training data (DMatrix)
+          watchlist = watchlist,                             # Watchlist with train and validation sets
+          nrounds = 50000,                                   # Max number of boosting iterations
+          early_stopping_rounds = 100,                        # Stop if no improvement after 10 rounds
+          verbose = 1)                                       # Print progress
+
+
+
+
+# Prepare test data using xgb.DMatrix
+dtest <- xgb.DMatrix(data = df_test_mat[, 1:(ncol(df_test_mat)-1)])  # Exclude the label column
+
+# Make predictions on the test set
+predictions <- predict(m3_xgb, dtest)
+
+```
+
+
+````{r performance, fig.width = 7, fig.height = 5}
+
+df_test$pred_probs <- predict(m1, newdata = df_test, type = "response")
+df_test$pred_class <- NA
+df_test$pred_class[df_test$pred_probs <= .5] <- 0
+df_test$pred_class[df_test$pred_probs > .5] <- 1
+
+df_test$pred_class_rf <- predict(m2_rf, df_test)
+
+
+pred_probs_xgb <- predict(m3_xgb, newdata = df_test_mat[,1:(ncol(df_test_mat)-1)])
+pred_class_xgb <- NA
+pred_class_xgb[pred_probs_xgb <= .5] <- 0
+pred_class_xgb[pred_probs_xgb > .5] <- 1
+
+
+conf_mat_glm <- table("ground truth"=df_test$Survived, "pred"=df_test$pred_class)
+conf_mat_rf <- table("ground truth"=df_test$Survived, "pred"=df_test$pred_class_rf)
+conf_mat_xgb <- table("ground truth"=df_test$Survived,"pred"=pred_class_xgb)
+
+
+
+plot(1,1,type = "n", xlim = c(0,1), ylim = c(10,0), axes = F, xlab = "", ylab = "")
+axis(1, at = seq(0,1,.2), labels = c("0%","20%","40%","60%","80%","100%"))
+rect(0,1-.3, conf_mat_glm[2,2] / sum(conf_mat_glm[,2]), 1+.3, col = "darkblue", lwd = 0)
+rect(0,2-.3, conf_mat_glm[2,2] / sum(conf_mat_glm[2,]), 2+.3, col = "darkblue", lwd = 0)
+rect(0,3-.3, sum(diag(conf_mat_glm)) / sum(conf_mat_glm), 3+.3, col = "darkblue", lwd = 0)
+
+rect(0,4-.3, conf_mat_rf[2,2] / sum(conf_mat_rf[,2]), 4+.3, col = "orange", lwd = 0)
+rect(0,5-.3, conf_mat_rf[2,2] / sum(conf_mat_rf[2,]), 5+.3, col = "orange", lwd = 0)
+rect(0,6-.3, sum(diag(conf_mat_rf)) / sum(conf_mat_rf), 6+.3, col = "orange", lwd = 0)
+
+rect(0,7-.3, conf_mat_xgb[2,2] / sum(conf_mat_xgb[,2]), 7+.3, col = "darkgreen", lwd = 0)
+rect(0,8-.3, conf_mat_xgb[2,2] / sum(conf_mat_xgb[2,]), 8+.3, col = "darkgreen", lwd = 0)
+rect(0,9-.3, sum(diag(conf_mat_xgb)) / sum(conf_mat_xgb), 9+.3, col = "darkgreen", lwd = 0)
+
+text(0,c(1,4,7), "Precision*",  col = "white", adj = 0)
+text(0,c(2,5,8), "Recall*",  col = "white", adj = 0)
+text(0,c(3,6,9), "Accuracy",  col = "white", adj = 0)
+
+text(conf_mat_glm[2,2] / sum(conf_mat_glm[,2]), 1, labels = paste0(round(conf_mat_glm[2,2] / sum(conf_mat_glm[,2]) * 100, 1), "%"), adj = 1, pos = 2, offset = 1, col = "white")
+text(conf_mat_glm[2,2] / sum(conf_mat_glm[2,]), 2, labels = paste0(round(conf_mat_glm[2,2] / sum(conf_mat_glm[2,]) * 100, 1), "%"), adj = 1, pos = 2, offset = 1, col = "white")
+text(sum(diag(conf_mat_glm)) / sum(conf_mat_glm), 3, labels = paste0(round(sum(diag(conf_mat_glm)) / sum(conf_mat_glm) * 100, 1), "%"), adj = 1, pos = 2, offset = 1, col = "white")
+text(conf_mat_rf[2,2] / sum(conf_mat_rf[,2]), 4, labels = paste0(round(conf_mat_rf[2,2] / sum(conf_mat_rf[,2]) * 100, 1), "%"), adj = 1, pos = 2, offset = 1, col = "white")
+text(conf_mat_rf[2,2] / sum(conf_mat_rf[2,]), 5, labels = paste0(round(conf_mat_rf[2,2] / sum(conf_mat_rf[2,]) * 100, 1), "%"), adj = 1, pos = 2, offset = 1, col = "white")
+text(sum(diag(conf_mat_rf)) / sum(conf_mat_rf), 6, labels = paste0(round(sum(diag(conf_mat_rf)) / sum(conf_mat_rf) * 100, 1), "%"), adj = 1, pos = 2, offset = 1, col = "white")
+text(conf_mat_xgb[2,2] / sum(conf_mat_xgb[,2]), 7, labels = paste0(round(conf_mat_xgb[2,2] / sum(conf_mat_xgb[,2]) * 100, 1), "%"), adj = 1, pos = 2, offset = 1, col = "white")
+text(conf_mat_xgb[2,2] / sum(conf_mat_xgb[2,]), 8, labels = paste0(round(conf_mat_xgb[2,2] / sum(conf_mat_xgb[2,]) * 100, 1), "%"), adj = 1, pos = 2, offset = 1, col = "white")
+text(sum(diag(conf_mat_xgb)) / sum(conf_mat_xgb), 9, labels = paste0(round(sum(diag(conf_mat_xgb)) / sum(conf_mat_xgb) * 100, 1), "%"), adj = 1, pos = 2, offset = 1, col = "white")
+
+legend("top", horiz = F, legend = c("GLM","Random Forest","XGBoost"), fill = c("darkblue","orange","darkgreen"), cex = .75)
+
+mtext("* with respect to survivors", side = 1, line = 2, adj = 0)
+````
+
+````{r feature importance, fig.width = 4, fig.height = 5}
+plot(1,1, type = "n", xlim = c(0,150), ylim = c(0, length(m2_rf$importance)+1), axes = F, xlab = "", ylab = "")
+rect(0, 
+     length(m2_rf$importance):1-.4, 
+     m2_rf$importance[rev(order(m2_rf$importance))], 
+     length(m2_rf$importance):1+.4,
+     col = "black"
+     #,density = .5
+     , border = F
+     )
+text(m2_rf$importance[rev(order(m2_rf$importance))] + 10, 
+     length(m2_rf$importance):1, 
+     names(m2_rf$forest$xlevels)[rev(order(m2_rf$importance))], adj = 0) 
+axis(1)
+mtext("Feature Importance", side = 1, line = 3)
+````
